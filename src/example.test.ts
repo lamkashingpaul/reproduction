@@ -1,12 +1,11 @@
 import "reflect-metadata";
 import {
   Entity,
-  MikroORM,
   PrimaryKey,
   Property,
-  raw,
   ReflectMetadataProvider,
-} from "@mikro-orm/sqlite";
+} from "@mikro-orm/decorators/legacy";
+import { MikroORM, raw } from "@mikro-orm/sqlite";
 
 @Entity()
 class Tool {
@@ -35,7 +34,7 @@ beforeAll(async () => {
     debug: ["query", "query-params"],
     allowGlobalContext: true, // only for testing
   });
-  await orm.schema.refreshDatabase();
+  await orm.schema.refresh();
 
   orm.em.create(Tool, { classId: 1, roleId: 1 });
   orm.em.create(Tool, { classId: 1, roleId: 2 });
@@ -58,6 +57,23 @@ const tuples = [
   [2, 2],
 ];
 
+// Unchanged from the v6 baseline (see the first of the three commits), other than
+// the expected SQL.
+//
+// v7 regressed this by flattening the array of tuples one level, losing the
+// row-value structure and producing SQL the driver rejects outright:
+//
+//   sqlite: SqliteError: IN(...) element has 1 term - expected 2
+//   mysql:  Operand should contain 2 column(s)
+//
+// The fix restores the row-value comparison. The rendering is the portable
+// `((a, b), ...)` form rather than the `( values (a, b), ...)` knex emitted in
+// v6 — it is what v7 already emits for composite (non-raw) keys, and unlike the
+// `values` spelling it also works on MySQL before 8.0.19:
+//
+//   v6:    where (`tool`.`class_id`, `tool`.`role_id`) in ( values (-1, -1), (1, 1), (2, 2))
+//   v7:    where (`tool`.`class_id`, `tool`.`role_id`) in (-1, -1, 1, 1, 2, 2)          <- broken
+//   fixed: where (`tool`.`class_id`, `tool`.`role_id`) in ((-1, -1), (1, 1), (2, 2))
 test("tuple $in on a raw() key", async () => {
   const qb = orm.em
     .createQueryBuilder(Tool, "tool")
@@ -68,7 +84,7 @@ test("tuple $in on a raw() key", async () => {
 
   expect(qb.getFormattedQuery()).toBe(
     "select `tool`.`id`, `tool`.`class_id`, `tool`.`role_id` from `tool` as `tool` " +
-      "where (`tool`.`class_id`, `tool`.`role_id`) in ( values (-1, -1), (1, 1), (2, 2))",
+      "where (`tool`.`class_id`, `tool`.`role_id`) in ((-1, -1), (1, 1), (2, 2))",
   );
 
   const rows = await qb.getResult();
